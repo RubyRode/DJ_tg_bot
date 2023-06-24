@@ -1,6 +1,7 @@
 import logging
 from aiogram import Bot, Dispatcher, types, executor
 import json
+import sqlite3
 
 from aiogram.contrib.fsm_storage.memory import MemoryStorage
 from aiogram.types.message import ContentType
@@ -27,10 +28,26 @@ dp = Dispatcher(bot, storage=MemoryStorage())
 queue_dict = {}
 track_order = 1
 
+conn = sqlite3.connect("dj_bot.db", check_same_thread=False)
+curs = conn.cursor()
+
+
+def db_table_val(user_id: int, user_name: str, num_songs: int):
+    curs.execute('INSERT INTO Users (User_id, User_name, first_free_three) VALUES (?, ?, ?)',
+                 (user_id, user_name, num_songs))
+    conn.commit()
+
 
 @dp.message_handler(state=States.AWAITING, commands=["book"])
 async def get_trackname(message: types.Message):
-    await bot.send_message(chat_id=message.chat.id, text=messages["track_request"])
+    us_id = message.from_user.username
+    left_use = curs.execute("SELECT first_free_three FROM Users WHERE User_id = ?", (us_id,))
+    left_use = tuple(left_use.fetchone())
+    if left_use[0] != 0:
+        await bot.send_message(chat_id=message.chat.id, text=f"У тебя осталось еще {left_use[0]} БЕСПЛАТНЫХ "
+                                                             f"заказа! Скорее пиши название песни!.")
+    else:
+        await bot.send_message(chat_id=message.chat.id, text=messages["track_request"])
     await States.TRACK_CHOSEN.set()
 
 
@@ -78,21 +95,15 @@ async def success_payment(message: types.Message):
     await States.AWAITING.set()
 
 
-@dp.message_handler(state=States.CHECKOUT_QUERY)
-async def success_payment(message: types.Message):
-    payment_info = message.successful_payment.to_python()
-
-    payload = json.loads(payment_info["invoice_payload"])
-    queue_dict[payload["user"] + "_" + str(payload["message_id"])]["state"] = "purchased"
-
-    await bot.send_message(message.chat.id, f"Платеж прошел успешно")
-    await bot.send_message(admin_chat_id, "Заказали новую песню, обнови очередь!")
-    await States.AWAITING.set()
-
-
-@dp.message_handler(commands=['start', 'help'])
+@dp.message_handler(commands=['start'])
 async def start_message(message: types.Message):
-    await bot.send_message(message.chat.id, messages["start_message"] + "\n")
+    names = curs.execute("SELECT User_name FROM Users")
+    if message.from_user.username in names.fetchone():
+        db_table_val(message.from_user.username, message.from_user.first_name + " " + message.from_user.last_name, 3)
+        await bot.send_message(message.chat.id, messages["first_time"] + "\n")
+    else:
+        await bot.send_message(message.chat.id, messages["start_message"] + "\n")
+
     await States.AWAITING.set()
 
 
