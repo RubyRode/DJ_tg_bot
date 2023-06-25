@@ -7,3 +7,5 @@ class States(StatesGroup):
     AWAITING = State("Awaits_for_messages")
     TRACK_CHOSEN = State("User_sent_trackname")
     CHECKOUT_QUERY = State("Checkout_query_sent")
+    FREE_TRACK = State("Free_track_handling")
+    COMMENT = State("Comment_to_dj")

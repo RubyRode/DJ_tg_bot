@@ -26,6 +26,7 @@ bot = Bot(token=TOKEN)
 dp = Dispatcher(bot, storage=MemoryStorage())
 
 queue_dict = {}
+queue_len = 0
 track_order = 1
 
 conn = sqlite3.connect("dj_bot.db", check_same_thread=False)
@@ -38,6 +39,21 @@ def db_table_val(user_id: int, user_name: str, num_songs: int):
     conn.commit()
 
 
+@dp.message_handler(state=States.AWAITING, commands=["comment"])
+async def comment_to_dj(message: types.Message):
+    await bot.send_message(message.chat.id, f"Напиши комментарий")
+    await States.COMMENT.set()
+
+
+@dp.message_handler(state=States.COMMENT)
+async def comment_handler(message: types.Message):
+    us_id = message.from_user.username
+    await bot.send_message(admin_chat_id, f"Комментарий от {us_id}: {message.text}")
+    curs.execute("INSERT INTO Comments (User_id, Comment) VALUES (?, ?)", (us_id, message.text,))
+    conn.commit()
+    await States.AWAITING.set()
+
+
 @dp.message_handler(state=States.AWAITING, commands=["book"])
 async def get_trackname(message: types.Message):
     us_id = message.from_user.username
@@ -46,35 +62,53 @@ async def get_trackname(message: types.Message):
     if left_use[0] != 0:
         await bot.send_message(chat_id=message.chat.id, text=f"У тебя осталось еще {left_use[0]} БЕСПЛАТНЫХ "
                                                              f"заказа! Скорее пиши название песни!.")
+        await States.FREE_TRACK.set()
     else:
         await bot.send_message(chat_id=message.chat.id, text=messages["track_request"])
-    await States.TRACK_CHOSEN.set()
+        await States.TRACK_CHOSEN.set()
 
 
 @dp.message_handler(state=States.TRACK_CHOSEN)
 async def send_invoice(message: types.Message):
-    user_track_id = message.from_user.username + "_" + str(message.message_id)
-    queue_dict[user_track_id] = {"message_id": message.message_id,
-                                 "user": message.from_user.username,
-                                 "track": message.text,
-                                 "price": 50,
-                                 "state": "in_progress",
-                                 "order": track_order
-                                 }
-    payload = json.dumps(queue_dict[user_track_id])
+    track_list_size = len(message.text.split('\n'))
+    us_id = message.from_user.username
+    left_use = curs.execute("SELECT first_free_three FROM Users WHERE User_id = ?", (us_id,)).fetchone()[0]
+    to_be_payed = track_list_size - left_use
 
-    await bot.send_invoice(chat_id=message.chat.id, title=message.text,
-                           description="Заказ песни/трека",
-                           currency="RUB",
-                           prices=[types.LabeledPrice(label="track", amount=5000)],
-                           provider_token=provider_token,
-                           need_name=True,
-                           need_phone_number=True,
-                           need_email=True,
-                           is_flexible=False,
-                           payload=payload
-                           )
-    await States.PURCHASING.set()
+    if to_be_payed > 0:
+        await bot.send_invoice(chat_id=message.chat.id, title=message.text,
+                               description="Заказ песни/трека",
+                               currency="RUB",
+                               prices=[types.LabeledPrice(label="track", amount=5000 * to_be_payed)],
+                               provider_token=provider_token,
+                               need_name=True,
+                               need_phone_number=True,
+                               need_email=True,
+                               is_flexible=False,
+                               payload="to be continued"
+                               )
+        await bot.send_message(admin_chat_id, "Заказали новую песню, обнови очередь!")
+        await States.PURCHASING.set()
+    else:
+        await States.FREE_TRACK.set()
+    curs.execute("UPDATE Users SET first_free_three = ? where User_id = ?", (max(0, left_use - track_list_size), us_id))
+
+
+@dp.message_handler(state=States.FREE_TRACK)
+async def free_track_handle(message: types.Message):
+    track_names = message.text.split('\n')
+    us_id = message.from_user.username
+    queue_length = curs.execute("SELECT MAX(ord_num) FROM Songs").fetchone()[0]
+    queue_length = 1 if queue_length is None else queue_length + 1
+
+    for track_name in track_names:
+        curs.execute("INSERT INTO Songs (User_id, song, ord_num) VALUES (?, ?, ?)", (us_id, track_name, queue_length,))
+        await bot.send_message(message.chat.id, f"Твоя песня добавлена в очередь ({queue_length})")
+        queue_length += 1
+    conn.commit()
+
+    await bot.send_message(admin_chat_id, "Заказали новую песню, обнови очередь!")
+    await States.AWAITING.set()
 
 
 @dp.pre_checkout_query_handler(state=States.PURCHASING)
@@ -85,24 +119,43 @@ async def pre_checkout_query(precheck_q: types.PreCheckoutQuery):
 
 @dp.message_handler(state=States.CHECKOUT_QUERY, content_types=ContentType.SUCCESSFUL_PAYMENT)
 async def success_payment(message: types.Message):
-    payment_info = message.successful_payment.to_python()
-
-    payload = json.loads(payment_info["invoice_payload"])
-    queue_dict[payload["user"] + "_" + str(payload["message_id"])]["state"] = "purchased"
-
     await bot.send_message(message.chat.id, f"Платеж прошел успешно")
+
+    track_names = message.text.split('\n')
+    us_id = message.from_user.username
+    queue_length = curs.execute("SELECT MAX(ord_num) FROM Songs").fetchone()[0]
+    queue_length = 1 if queue_length is None else queue_length + 1
+
+    for track_name in track_names:
+        curs.execute("INSERT INTO Songs (User_id, song, ord_num) VALUES (?, ?, ?)", (us_id, track_name, queue_length,))
+        await bot.send_message(message.chat.id, f"Твоя песня добавлена в очередь ({queue_length})")
+        queue_length += 1
+    conn.commit()
+
     await bot.send_message(admin_chat_id, "Заказали новую песню, обнови очередь!")
     await States.AWAITING.set()
 
 
+def in_list_of_tuples(value, destination):
+    for tpl in destination:
+        if value in tpl:
+            return True
+    return False
+
+
 @dp.message_handler(commands=['start'])
 async def start_message(message: types.Message):
-    names = curs.execute("SELECT User_name FROM Users")
-    if message.from_user.username in names.fetchone():
+    names_list = curs.execute("SELECT User_id FROM Users").fetchall()
+
+    if names_list is None:
         db_table_val(message.from_user.username, message.from_user.first_name + " " + message.from_user.last_name, 3)
         await bot.send_message(message.chat.id, messages["first_time"] + "\n")
     else:
-        await bot.send_message(message.chat.id, messages["start_message"] + "\n")
+        if in_list_of_tuples(message.from_user.username, names_list):
+            await bot.send_message(message.chat.id, messages["start_message"] + "\n")
+        else:
+            db_table_val(message.from_user.username, message.from_user.first_name + " " + message.from_user.last_name, 3)
+            await bot.send_message(message.chat.id, messages["first_time"] + "\n")
 
     await States.AWAITING.set()
 
