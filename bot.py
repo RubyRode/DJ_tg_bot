@@ -33,10 +33,6 @@ bot = Bot(token=TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(bot, storage=storage)
 
-queue_dict = {}
-queue_len = 0
-track_order = 1
-
 
 def db_table_val(user_id: int, user_name: str, num_songs: int):
     curs.execute('INSERT INTO Users (User_id, User_name, first_free_three) VALUES (?, ?, ?)',

@@ -12,7 +12,6 @@ parser.add_argument("-d", "--drop_credentials", action='store_true', help='Drop 
 
 args = parser.parse_args()
 
-
 admin_chat_id = args.admin
 payload_token = args.pay_token
 bot_token = args.bot_token
