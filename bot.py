@@ -9,7 +9,7 @@ from States import States
 
 
 menu_commands = ["/start", "/book", "/comment"]
-admin_commands = ["/get_queue"]
+admin_commands = ["/get_queue", "/drop_queue", "/drop_users"]
 keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True).add(*menu_commands)
 
 logging.basicConfig(level=logging.DEBUG,
@@ -67,19 +67,18 @@ async def get_trackname(message: types.Message):
     if left_use[0] != 0:
         await bot.send_message(chat_id=message.chat.id, text=f"У тебя осталось еще {left_use[0]} БЕСПЛАТНЫХ "
                                                              f"заказа! Скорее пиши название песни!.")
-        await States.FREE_TRACK.set()
     else:
         await bot.send_message(chat_id=message.chat.id, text=messages["track_request"])
-        await States.TRACK_CHOSEN.set()
+    await States.TRACK_CHOSEN.set()
 
 
 @dp.message_handler(state=States.TRACK_CHOSEN)
 async def send_invoice(message: types.Message):
-    track_list_size = len(message.text.split('\n'))
+    track_names = message.text.split('\n')
+    track_list_size = len(track_names)
     us_id = message.from_user.username
     left_use = curs.execute("SELECT first_free_three FROM Users WHERE User_id = ?", (us_id,)).fetchone()[0]
     to_be_payed = track_list_size - left_use
-
     if to_be_payed > 0:
         await bot.send_invoice(chat_id=message.chat.id, title=message.text,
                                description="Заказ песни/трека",
@@ -92,28 +91,20 @@ async def send_invoice(message: types.Message):
                                is_flexible=False,
                                payload="to be continued"
                                )
-        await bot.send_message(admin_chat_id, "Заказали новую песню, обнови очередь!")
+        curs.execute("UPDATE Users SET first_free_three = ? where User_id = ?",
+                     (0, us_id))
+        curs.execute("INSERT INTO Payment_waiting_list (User_id, Payment_succeeded, Booking_completed, track_list) "
+                     "VALUES (?, ?, ?, ?)", (us_id, False, False, message.text,))
+        conn.commit()
         await States.PURCHASING.set()
     else:
-        await States.FREE_TRACK.set()
-    curs.execute("UPDATE Users SET first_free_three = ? where User_id = ?", (max(0, left_use - track_list_size), us_id))
-
-
-@dp.message_handler(state=States.FREE_TRACK)
-async def free_track_handle(message: types.Message):
-    track_names = message.text.split('\n')
-    us_id = message.from_user.username
-    queue_length = curs.execute("SELECT MAX(ord_num) FROM Songs").fetchone()[0]
-    queue_length = 1 if queue_length is None else queue_length + 1
-
-    for track_name in track_names:
-        curs.execute("INSERT INTO Songs (User_id, song, ord_num) VALUES (?, ?, ?)", (us_id, track_name, queue_length,))
-        await bot.send_message(message.chat.id, f"Твоя песня добавлена в очередь ({queue_length})")
-        queue_length += 1
-    conn.commit()
-
-    await bot.send_message(admin_chat_id, "Заказали новую песню, обнови очередь!")
-    await States.AWAITING.set()
+        curs.execute("UPDATE Users SET first_free_three = ? where User_id = ?",
+                     (max(0, left_use - track_list_size), us_id))
+        curs.execute("INSERT INTO Payment_waiting_list (User_id, Payment_succeeded, Booking_completed, track_list) "
+                     "VALUES (?, ?, ?, ?)", (us_id, True, False, message.text,))
+        conn.commit()
+        await add_to_queue(message)
+        await States.AWAITING.set()
 
 
 @dp.pre_checkout_query_handler(state=States.PURCHASING)
@@ -124,21 +115,31 @@ async def pre_checkout_query(precheck_q: types.PreCheckoutQuery):
 
 @dp.message_handler(state=States.CHECKOUT_QUERY, content_types=ContentType.SUCCESSFUL_PAYMENT)
 async def success_payment(message: types.Message):
-    await bot.send_message(message.chat.id, f"Платеж прошел успешно")
-
-    track_names = message.text.split('\n')
     us_id = message.from_user.username
+    curs.execute("UPDATE Payment_waiting_list SET Payment_succeeded = ? "
+                 "WHERE User_id == ? and Booking_completed == ?", (True, us_id, False,))
+    await bot.send_message(message.chat.id, f"Платеж прошел успешно")
+    await add_to_queue(message)
+    await States.AWAITING.set()
+
+
+async def add_to_queue(message: types.Message):
+    us_id = message.from_user.username
+    track_names = curs.execute("SELECT track_list FROM Payment_waiting_list WHERE "
+                               "Payment_succeeded == ? and Booking_completed == ?", (True, False,)).fetchone()[0]
+    track_names = track_names.split("\n")
+    curs.execute("UPDATE Payment_waiting_list SET Booking_completed = ? "
+                 "WHERE User_id == ? AND Booking_completed == ?", (True, us_id, False))
     queue_length = curs.execute("SELECT MAX(ord_num) FROM Songs").fetchone()[0]
     queue_length = 1 if queue_length is None else queue_length + 1
 
     for track_name in track_names:
-        curs.execute("INSERT INTO Songs (User_id, song, ord_num) VALUES (?, ?, ?)", (us_id, track_name, queue_length,))
+        curs.execute("INSERT INTO Songs (User_id, song, ord_num) VALUES (?, ?, ?)",
+                     (us_id, track_name, queue_length,))
         await bot.send_message(message.chat.id, f"Твоя песня добавлена в очередь ({queue_length})")
         queue_length += 1
     conn.commit()
-
     await bot.send_message(admin_chat_id, "Заказали новую песню, обнови очередь!")
-    await States.AWAITING.set()
 
 
 def in_list_of_tuples(value, destination):
@@ -168,13 +169,25 @@ async def start_message(message: types.Message):
 
 
 @dp.message_handler(state=States.AWAITING, commands=["get_queue"])
-async def send_admin_queue(message: types.Message):
+async def get_queue(message: types.Message):
     if int(message.chat.id) == int(admin_chat_id):
         queue_list = curs.execute("SELECT User_id, song, ord_num FROM Songs ORDER BY ord_num ASC").fetchall()
         output_string = str()
         for id, song, ord in queue_list:
             output_string += f"[{ord}] {id} : {song}\n"
-        await bot.send_message(admin_chat_id, output_string)
+        if output_string:
+            await bot.send_message(admin_chat_id, output_string)
+        else:
+            await bot.send_message(admin_chat_id, "Очередь пуста.")
+    else:
+        await message.reply("Эта команда доступна только админу")
+
+
+@dp.message_handler(state=States.AWAITING, commands=["drop_queue"])
+async def drop_queue(message: types.Message):
+    if int(message.chat.id) == int(admin_chat_id):
+        curs.execute("DELETE FROM Songs").fetchall()
+        await bot.send_message(admin_chat_id, "Очередь очищена!")
     else:
         await message.reply("Эта команда доступна только админу")
 
