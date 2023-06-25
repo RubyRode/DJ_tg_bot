@@ -7,6 +7,7 @@ from aiogram.types.message import ContentType
 
 from States import States
 
+
 menu_commands = ["/start", "/book", "/comment"]
 admin_commands = ["/get_queue"]
 keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True).add(*menu_commands)
