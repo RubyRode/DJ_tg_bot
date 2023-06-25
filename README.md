@@ -1,2 +1,2 @@
 Start:
-!python path/main.py --
+!python path/main.py --start --admin <int> --pay_token
